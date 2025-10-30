@@ -1,11 +1,13 @@
 import discord
-from discord.ext import commands
+import os
+from discord.ext import commands, tasks
 from discord import app_commands
-import asyncio
+from datetime import datetime
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="/", intents=intents)
 friend_codes = {}
+muted_people = []
 PARTY_SIZE = 4  # fixed party size
 CHANNEL_ID = 0
 
@@ -57,7 +59,7 @@ class LFGView(discord.ui.View):
         self.members[role] = creator
         self.message: discord.Message | None = None  # track the public message
         self.mode = mode
-        self.mode = mode
+        self.last_update_time = datetime.now()
 
     @discord.ui.button(label="Join Party", style=discord.ButtonStyle.green)
     async def join_button(
@@ -115,6 +117,10 @@ class LFGView(discord.ui.View):
         )
         await self.message.edit(embed=embed, view=self)
 
+
+open_lobbies = []
+async def remove_lfg(lfg: LFGView):
+    await lfg.message.delete()
 
 # --- Description Modal ---
 class DescriptionModal(discord.ui.Modal, title="Set Party Description"):
@@ -195,6 +201,7 @@ class LFGSetupView(discord.ui.View):
     #     )  # store public message reference
     #     self.stop()
 
+
     @discord.ui.button(label="Create Party 🚀", style=discord.ButtonStyle.success)
     async def create_party_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -209,6 +216,11 @@ class LFGSetupView(discord.ui.View):
                 "Please select your role.", ephemeral=True
             )
             return
+        
+        for i in range(0, len(open_lobbies)):
+            if open_lobbies[i] != None and open_lobbies[i].creator == self.user:
+                await remove_lfg(open_lobbies[i])
+                open_lobbies[i] = None
 
         role_index = {"🛡 Tank": 0, "⚔ DPS1": 1, "⚔ DPS2": 2, "💚 Healer": 3}[self.role]
         view = LFGView(
@@ -231,6 +243,7 @@ class LFGSetupView(discord.ui.View):
         # 2️⃣ Then send the public party message
         message = await interaction.channel.send(embed=embed, view=view)
         view.message = message  # store the reference
+        open_lobbies.append(view)
         self.stop()
 
 
@@ -256,6 +269,7 @@ class ModeSelect(discord.ui.Select):
     def __init__(self, parent_view: LFGSetupView):
         self.parent_view = parent_view
         options = [
+            discord.SelectOption(label="👻Halloween skin farming👻"),
             discord.SelectOption(label="Dungeon Farm"),
             discord.SelectOption(label="Capstone Clearing"),
             discord.SelectOption(label="Other activity"),
@@ -312,6 +326,9 @@ class RoleSelectView(discord.ui.View):
         await interaction.response.edit_message(
             content=f"You joined as **{role_name}**!", view=None
         )
+        self.parent_view.last_update_time = datetime.now()
+        if self.parent_view.creator != self.user:
+            await notify_user(self.parent_view.creator, self.parent_view, f"{self.user.display_name} joined your party as {role_name}.")
         self.stop()
 
 
@@ -338,6 +355,29 @@ async def lfg(interaction: discord.Interaction):
         "Configure your LFG party below:", view=view, ephemeral=True
     )
 
+@bot.tree.command(name="lfg_mute", description="Mute LFG bot DMs")
+async def lfg_mute(interaction: discord.Interaction):
+    if interaction.user.display_name.strip() not in muted_people:
+        muted_people.append(interaction.user.display_name.strip())
+        with open("ignored.txt", "a+") as file:
+            file.write(interaction.user.display_name.strip())
+    
+    
+    await interaction.response.send_message("LFG bot will no longer send you DMs!", ephemeral=True)
+
+@bot.tree.command(name="lfg_unmute", description="Enable DMs from the LFG bot")
+async def lfg_unmute(interaction:discord.Interaction):
+    if interaction.user.display_name.strip() in muted_people:
+        muted_people.remove(interaction.user.display_name.strip())
+        with open("ignored.txt", "r") as file:
+            lines = file.readlines()
+        with open("ignored.txt", "w") as file:
+            for line in lines:
+                if line.strip() != interaction.user.display_name.strip():
+                    file.write(line)
+
+    await interaction.response.send_message("LFG bot will send DMs again!", ephemeral=True)
+    
 
 # @bot.tree.command(
 #     name="lfg_register", description="registers friend code for the lfg bot."
@@ -350,6 +390,16 @@ async def lfg(interaction: discord.Interaction):
 #         "Friend code registered, use command again to overwrite.", ephemeral=True
 #     )
 
+async def notify_user(user: discord.User, LFGView: LFGView, message: str):
+    if user.display_name.strip() in muted_people:
+        return
+
+    try:
+        await user.send(message)
+    except Exception as err:
+        print(f"Failed to send message {message}, to user {user.display_name}. {err}")
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -358,7 +408,15 @@ async def on_message(message: discord.Message):
     if message.channel.id != CHANNEL_ID:
         return
     
-    friend_codes[message.author.display_name] = message.content
+    fellow_index = message.content.find("FELLOW")
+    if fellow_index == -1:
+        return
+    end_index = message.content.find(" ", fellow_index)
+    if end_index == -1:
+        code = message.content[fellow_index:]
+    else:
+        code = message.content[fellow_index:end_index]
+    friend_codes[message.author.display_name] = code
     print(f"{message.author.display_name}: {message.content}")
 
 async def read_friend_code_history():
@@ -369,8 +427,16 @@ async def read_friend_code_history():
 
     messages = []
     async for message in channel.history(limit=None, oldest_first=True):
-        friend_codes[message.author.display_name] = message.content
-        print(f"{message.author.display_name}: {message.content}")
+        fellow_index = message.content.find("FELLOW")
+        if fellow_index == -1:
+            continue
+        end_index = message.content.find(" ", fellow_index)
+        if end_index == -1:
+            code = message.content[fellow_index:]
+        else:
+            code = message.content[fellow_index:end_index]
+        friend_codes[message.author.display_name] = code
+        print(f"{message.author.display_name}: {code}")
 
 @bot.event
 async def on_ready():
@@ -378,10 +444,26 @@ async def on_ready():
     await bot.tree.sync()
     print("Slash commands synced.")
     await read_friend_code_history()
+    hourly_task.start()
+
+@tasks.loop(seconds=10)
+async def hourly_task():
+    now = datetime.now()
+    for i in range(0, len(open_lobbies)):
+        if open_lobbies[i] != None and (now - open_lobbies[i].last_update_time).total_seconds() / 3600 > 3:
+            await remove_lfg(open_lobbies[i])
+            open_lobbies[i] = None
 
 bot_token = ""
 with open(".env") as f:
     bot_token = f.readline().strip()
     CHANNEL_ID = int(f.readline().strip())
+
+if not os.path.exists("ignored.txt"):
+    open("ignored.txt", "w").close()  # create empty file
+
+with open("ignored.txt", "r+") as f:
+    for line in f:
+        muted_people.append(line.strip())
 
 bot.run(bot_token)
