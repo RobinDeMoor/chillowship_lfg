@@ -2,12 +2,14 @@ import discord
 import os
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime
+from datetime import datetime, timezone
+from drawer import generate_image
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="/", intents=intents)
 friend_codes = {}
 muted_people = []
+current_id = 0
 PARTY_SIZE = 4  # fixed party size
 CHANNEL_ID = 0
 
@@ -15,30 +17,50 @@ def construct_embed(
     description: str,
     difficulty: str,
     members: list[discord.User],
-    mode: str,
+    heroes: list[str],
     creator: str,
+    timer: str,
+    id : int
 ):
     roles = ["🛡 Tank", "⚔ DPS1", "⚔ DPS2", "💚 Healer"]
-    members_text = ""
+    member_names = []
     member_count = 0
 
+    # for i, role in enumerate(roles):
+    #     if members[i] is not None:
+    #         friend_code = "No friend code registered"
+    #         if members[i].display_name in friend_codes:
+    #             friend_code = friend_codes[members[i].display_name]
+    #         members_text += f"{role}: {members[i].display_name} {friend_code}\n"
+    #         member_count += 1
+    #     else:
+    #         members_text += f"{role}: open\n"
+
+    # ait interaction.response.edit_message(content=f"Time set to <t:{timestamp}:f> (<t:{timestamp}:R>)")
+    time_data = f"<t:{timer}:R>"
     for i, role in enumerate(roles):
         if members[i] is not None:
-            friend_code = "No friend code registered"
-            if members[i].display_name in friend_codes:
-                friend_code = friend_codes[members[i].display_name]
-            members_text += f"{role}: {members[i].display_name} {friend_code}\n"
             member_count += 1
+            member_names.append(members[i].display_name)
         else:
-            members_text += f"{role}: open\n"
-    if mode is None:
-        mode = "Party"
+            member_names.append("Open")
+    friend_code = "No friend code registered"
+    if creator in friend_codes:
+        friend_code = friend_codes[creator]
     embed = discord.Embed(
-        title=f"{creator}'s {mode} ({member_count}/{PARTY_SIZE})",
-        description=f"**{difficulty}**\n{description}\n\n**Members:**\n{members_text}",
+        title=f"{creator}'s LFG ({member_count}/{PARTY_SIZE})",
+        # description=f"**{difficulty}**\n{description}\n\n**Members:**\n{members_text}",
+        description=friend_code + "\n" + f"LFG in: {time_data}",
         color=discord.Color.blurple(),
     )
-    return embed
+    time_left = round((timer - datetime.now(timezone.utc).timestamp()) / 3600)
+
+
+    image = generate_image(member_names, heroes, difficulty, time_left)
+    image.save('test.png')
+    file = discord.File("test.png", filename="test.png")
+    embed.set_image(url="attachment://test.png")
+    return embed, file
 
 
 # --- Public LFG View ---
@@ -49,7 +71,7 @@ class LFGView(discord.ui.View):
         description: str,
         difficulty: str,
         role: int,
-        mode: str,
+        timer: str,
     ):
         super().__init__(timeout=None)
         self.creator = creator
@@ -58,8 +80,12 @@ class LFGView(discord.ui.View):
         self.members = [None, None, None, None]
         self.members[role] = creator
         self.message: discord.Message | None = None  # track the public message
-        self.mode = mode
         self.last_update_time = datetime.now()
+        self.heroes = ["None", "None", "None", "None"]
+        self.timer = timer
+        global current_id
+        self.id_m = current_id
+        current_id += 1
 
     @discord.ui.button(label="Join Party", style=discord.ButtonStyle.green)
     async def join_button(
@@ -108,19 +134,24 @@ class LFGView(discord.ui.View):
         """Edits the public LFG message."""
         if not self.message:
             return
-        embed = construct_embed(
+        embed, file = construct_embed(
             self.description,
             self.difficulty,
             self.members,
-            self.mode,
+            self.heroes,
             self.creator.display_name,
+            self.timer,
+            self.id_m
         )
-        await self.message.edit(embed=embed, view=self)
+        await self.message.edit(embed=embed, view=self, attachments=[file])
 
 
 open_lobbies = []
 async def remove_lfg(lfg: LFGView):
-    await lfg.message.delete()
+    try:
+        await lfg.message.delete()
+    except:
+        print(f'Could not delete message in {lfg}')
 
 # --- Description Modal ---
 class DescriptionModal(discord.ui.Modal, title="Set Party Description"):
@@ -151,26 +182,26 @@ class LFGSetupView(discord.ui.View):
         self.description = "No description provided."
         self.difficulty = None
         self.role = None
-        self.mode = None
-        self.add_item(ModeSelect(self))
         self.add_item(DifficultySelect(self))
         self.add_item(RoleSelect(self))
+        self.add_item(LFGTimeSelect(self))
+        self.timer = ""
 
     async def update_setup_message(self, interaction: discord.Interaction):
         text = (
-            f"**Party Mode:** {self.mode}\n"
             f"**Difficulty:** {self.difficulty}\n"
             f"**Description:** {self.description}\n"
-            f"**Role:** {self.role}\n\n"
+            f"**Role:** {self.role}\n"
+            f"**When?:** <t:{self.timer}:R>\n\n"
             "Press **Set Description** to edit or **Create Party** when ready."
         )
         await interaction.response.edit_message(content=text, view=self)
 
-    @discord.ui.button(label="Set Description ✏️", style=discord.ButtonStyle.secondary)
-    async def set_description_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await interaction.response.send_modal(DescriptionModal(self))
+    # @discord.ui.button(label="Set Description ✏️", style=discord.ButtonStyle.secondary)
+    # async def set_description_button(
+    #     self, interaction: discord.Interaction, button: discord.ui.Button
+    # ):
+        # await interaction.response.send_modal(DescriptionModal(self))
 
     # @discord.ui.button(label="Create Party 🚀", style=discord.ButtonStyle.success)
     # async def create_party_button(
@@ -206,6 +237,7 @@ class LFGSetupView(discord.ui.View):
     async def create_party_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        global current_id
         if not self.difficulty:
             await interaction.response.send_message(
                 "Please select a difficulty.", ephemeral=True
@@ -222,29 +254,72 @@ class LFGSetupView(discord.ui.View):
                 await remove_lfg(open_lobbies[i])
                 open_lobbies[i] = None
 
-        role_index = {"🛡 Tank": 0, "⚔ DPS1": 1, "⚔ DPS2": 2, "💚 Healer": 3}[self.role]
+        role_index = 0
+        if "🛡" in self.role:
+            role_index = 0
+        elif "⚔" in self.role:
+            role_index = 1
+        else:
+            role_index = 3
+        
+        hero = self.role[self.role.find(" "):].lower().strip()
+        heroes = []
+        for i in range(0, 4):
+            heroes.append("None")
+        heroes[role_index] = hero
+
+        if self.timer == "":
+            self.timer = int(datetime.now(timezone.utc).timestamp())
+    
         view = LFGView(
-            self.user, self.description, self.difficulty, role_index, self.mode
+            self.user, self.description, self.difficulty, role_index, self.timer
         )
-        embed = construct_embed(
+        embed, file = construct_embed(
             self.description,
             self.difficulty,
             view.members,
-            self.mode,
+            heroes,
             self.user.display_name,
+            self.timer,
+            current_id
         )
 
-        # # 1️⃣ First, acknowledge the interaction by editing the ephemeral message
-        # await interaction.response.edit_message(
-        #     content="✅ Party created! Check the channel for your post.",
-        #     view=None,  # removes buttons
-        # )
-
-        # 2️⃣ Then send the public party message
-        message = await interaction.channel.send(embed=embed, view=view)
+        message = await interaction.channel.send(embed=embed, view=view, file=file)
         view.message = message  # store the reference
         open_lobbies.append(view)
         self.stop()
+
+class LFGTimeSelect(discord.ui.Select):
+    def __init__(self, lfg_view: LFGSetupView):
+        self.parent_view = lfg_view
+        options = [
+            discord.SelectOption(label="Right now", value="now"),
+            discord.SelectOption(label="In ~1 hour", value="1h"),
+            discord.SelectOption(label="In ~3 hours", value="3h"),
+            discord.SelectOption(label="In ~6 hours", value="6h"),
+            discord.SelectOption(label="Tomorrow", value="24h"),
+            # discord.SelectOption(label="Custom date/time", value="custom"),
+        ]
+        super().__init__(placeholder="Select time...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+
+        if self.values[0] == "now":
+            timestamp = int(now.timestamp())
+        elif self.values[0].endswith("h"):
+            hours = int(self.values[0].replace("h", ""))
+            timestamp = int((now + timedelta(hours=hours)).timestamp())
+        # else:
+        #     # You’ll need another modal for custom entry
+        #     ...
+        
+        # Store the timestamp in your LFG object
+        # self.parent_view.start_time = timestamp
+        self.parent_view.timer = timestamp
+        await self.parent_view.update_setup_message(interaction)
+        await interaction.response.edit_message(content=f"Time set to <t:{timestamp}:f> (<t:{timestamp}:R>)")
 
 
 # --- Difficulty Dropdown ---
@@ -265,31 +340,20 @@ class DifficultySelect(discord.ui.Select):
         await self.parent_view.update_setup_message(interaction)
 
 
-class ModeSelect(discord.ui.Select):
-    def __init__(self, parent_view: LFGSetupView):
-        self.parent_view = parent_view
-        options = [
-            discord.SelectOption(label="👻Halloween skin farming👻"),
-            discord.SelectOption(label="Dungeon Farm"),
-            discord.SelectOption(label="Capstone Clearing"),
-            discord.SelectOption(label="Other activity"),
-        ]
-        super().__init__(placeholder="Select party type", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        self.parent_view.mode = self.values[0]
-        await self.parent_view.update_setup_message(interaction)
-
-
 # --- Role Select for Setup ---
 class RoleSelect(discord.ui.Select):
     def __init__(self, parent_view: LFGSetupView):
         self.parent_view = parent_view
         options = [
-            discord.SelectOption(label="🛡 Tank"),
-            discord.SelectOption(label="⚔ DPS1"),
-            discord.SelectOption(label="⚔ DPS2"),
-            discord.SelectOption(label="💚 Healer"),
+            discord.SelectOption(label="🛡 Helena"),
+            discord.SelectOption(label="🛡 Meiko"),
+            discord.SelectOption(label="⚔ Tariq"),
+            discord.SelectOption(label="⚔ Ardeos"),
+            discord.SelectOption(label="⚔ Mara"),
+            discord.SelectOption(label="⚔ Elarion"),
+            discord.SelectOption(label="⚔ Rime"),
+            discord.SelectOption(label="💚 Sylvie"),
+            discord.SelectOption(label="💚 Vigour"),
         ]
         super().__init__(placeholder="Select Role", options=options)
 
@@ -309,18 +373,30 @@ class RoleSelectView(discord.ui.View):
     async def finalize_selection(
         self, interaction: discord.Interaction, role_name: str
     ):
-        role_index = {"🛡 Tank": 0, "⚔ DPS1": 1, "⚔ DPS2": 2, "💚 Healer": 3}[role_name]
+        for i, member in enumerate(self.parent_view.members):
+            if member == interaction.user:
+                self.parent_view.members[i] = None
+                self.parent_view.heroes[i] = "None"
+
+        role_index = 0
+        if "🛡" in role_name:
+            role_index = 0
+        elif "⚔" in role_name:
+            role_index = 1
+            if self.parent_view.members[1] is not None:
+                role_index = 2
+        else:
+            role_index = 3
+        
         if self.parent_view.members[role_index] is not None:
             await interaction.response.edit_message(
                 content="That role is already taken.", view=None
             )
             return
 
-        for i, member in enumerate(self.parent_view.members):
-            if member == interaction.user:
-                self.parent_view.members[i] = None
-
         self.parent_view.members[role_index] = self.user
+        hero = role_name[role_name.find(" "):].lower().strip()
+        self.parent_view.heroes[role_index] = hero
         await self.parent_view.update_public_message()
 
         await interaction.response.edit_message(
@@ -336,10 +412,15 @@ class RoleSelect2(discord.ui.Select):
     def __init__(self, parent_view: RoleSelectView):
         self.parent_view = parent_view
         options = [
-            discord.SelectOption(label="🛡 Tank"),
-            discord.SelectOption(label="⚔ DPS1"),
-            discord.SelectOption(label="⚔ DPS2"),
-            discord.SelectOption(label="💚 Healer"),
+            discord.SelectOption(label="🛡 Helena"),
+            discord.SelectOption(label="🛡 Meiko"),
+            discord.SelectOption(label="⚔ Tariq"),
+            discord.SelectOption(label="⚔ Ardeos"),
+            discord.SelectOption(label="⚔ Mara"),
+            discord.SelectOption(label="⚔ Elarion"),
+            discord.SelectOption(label="⚔ Rime"),
+            discord.SelectOption(label="💚 Sylvie"),
+            discord.SelectOption(label="💚 Vigour"),
         ]
         super().__init__(placeholder="Select Role", options=options)
 
